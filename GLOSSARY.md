@@ -41,7 +41,7 @@ The Tracker state meaning the Run's pull request is open for review and sous-che
 _Avoid_: Code review, pending review
 
 **Awaiting Merge**:
-The Tracker state meaning a Run succeeded: its pull request is approved and green, and waits for the developer to merge it.
+The Tracker state meaning a Run succeeded: its pull request has Approval, passing checks and no outstanding Feedback, and waits for the developer to merge it.
 _Avoid_: Approved, ready to merge, done
 
 **Needs Human**:
@@ -63,3 +63,15 @@ _Avoid_: Maintainer, collaborator, authorized user
 **Self-Review**:
 A review of a Run's changes by a fresh Coding Agent session, before the PR is marked ready for human review.
 _Avoid_: AI review, auto-review, pre-review
+
+**Feedback**:
+Input on a Run's pull request that sous-chef acts on: review threads, reviews and comments from Trusted Users, and failing checks.
+_Avoid_: Review comments (only one kind of Feedback), PR feedback, notes
+
+**Feedback Round**:
+One round of addressing a settled batch of Feedback on a Run's pull request: a feedback Pass, any retries after failed checks, and the push and replies that follow.
+_Avoid_: Iteration, cycle, loop
+
+**Approval**:
+A Trusted User's sign-off on a Run's pull request: an approving review from a Trusted User who isn't the PR's author, or the approval label applied by a Trusted User.
+_Avoid_: LGTM, sign-off, accept
