@@ -15,3 +15,9 @@ We chose this for three reasons. sous-chef already has to own pushes, so the Cod
 - Self-Review only makes sense as a separate step with its own fresh session. That is possible only because sous-chef, not the agent, owns the sequence.
 
 See [What is the default development workflow, and how is it overridden per repo?](https://github.com/wkimdkim-nz/sous-chef/issues/8).
+
+## Amendment: v1 drives Claude Code only
+
+v1 now supports one Coding Agent, Claude Code. Cursor is deferred to a future enhancement. So the third reason above, that the sequence has to behave the same way on Claude and on Cursor, doesn't apply to v1. The decision still stands on the other two reasons: sous-chef owns pushes, and a Run's outcome comes from deterministic signals. The third reason applies again when a second Coding Agent is added.
+
+See the **Out of scope** section of [Wayfinder: sous-chef — tracker-driven AI development CLI](https://github.com/wkimdkim-nz/sous-chef/issues/1).
