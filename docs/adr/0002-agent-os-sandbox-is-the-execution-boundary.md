@@ -60,3 +60,27 @@ The boundary itself is unchanged: one sandbox policy, translated by the Coding A
 Whoever adds Cursor reopens this decision then. The probes in [Can a headless Cursor Run escape its sandbox?](https://github.com/wkimdkim-nz/sous-chef/issues/14), closed unresolved, are where that starts.
 
 See the **Out of scope** section of [Wayfinder: sous-chef — tracker-driven AI development CLI](https://github.com/wkimdkim-nz/sous-chef/issues/1).
+
+## Amendment: Workspace git never runs repo- or agent-controlled code
+
+The boundary lets the agent write the repo's `.git`, because committing needs objects, refs and the index. But `.git` also holds code that git runs: `hooks/*`, plus whatever `.git/config` or a worktree's `config.worktree` names in `core.hooksPath`, `core.fsmonitor` or a filter driver. sous-chef's Workspace runs `git` (fetch, merge, push) **outside** the sandbox, with the push credential in reach. So without a guard, an agent steered by a hostile Work Item could plant a hook that sous-chef itself would run, unsandboxed, on its next git command.
+
+So **Workspace git never runs code the repo or the agent controls**, and sous-chef works in **a clone it owns**, never in the developer's own clone:
+
+- Every Workspace git command runs with `-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never`, with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`, so only sous-chef's own settings apply.
+- The sandbox denies writes to `.git/hooks/**`, `.git/config` and `.git/worktrees/*/config.worktree`.
+- Worktrees come from a partial clone (`--filter=blob:none`) under `$XDG_DATA_HOME/sous-chef/<owner>/<repo>/`, created by `init` or on first start.
+- The GitHub token reaches git only through an inline credential helper, set per command after clearing every configured helper, and only in that one git child's env. It's never written to disk or git config.
+
+### Considered Options
+
+- **Use the developer's own clone.** Rejected. The guard above protects only sous-chef's git calls. A hook or config the agent planted in that `.git` would still run the next time the developer runs `git commit`, unsandboxed and with all their credentials. The agent could also move the developer's local refs. The developer's own git setup (husky, sparse checkout, a dirty tree) would leak into Runs as well. Using its own clone costs disk space and the wait for a first clone, which the partial clone keeps small.
+- **Guard only with flags, or only with sandbox write denies.** Rejected. Each is one mistake away from failing: a git command missing a flag, or a config path the deny list didn't name. Together, both would have to fail.
+
+### Consequences
+
+- Git LFS and submodules don't work in v1, because global config (where LFS installs itself) is ignored and the agent can't reach github.com. Preflight warns when the repo uses either. If a Run's diff adds a file matching an LFS pattern, the PR isn't marked ready, and the Run goes to Needs Human.
+- To try a Run's branch locally, the developer fetches it into their own clone. It's always pushed.
+- The sandbox probe suite gains a probe that plants a hook and checks it never fires.
+
+See [What CLI commands and config file does sous-chef have?](https://github.com/wkimdkim-nz/sous-chef/issues/15).
