@@ -48,6 +48,10 @@ _Avoid_: Approved, ready to merge, done
 The Tracker state meaning a Run stopped without finishing (it failed, hit a limit, or needs information) and waits for the developer to act.
 _Avoid_: Blocked, failed, stuck, needs info (each is a reason, not the state)
 
+**Hold**:
+Commits a Run made that sous-chef won't push, because they touch a protected path or add a file matching an LFS pattern. They stay local until the developer pushes or discards them.
+_Avoid_: Quarantine, block, reject
+
 **Withdraw**:
 To take a Work Item back from its Run by moving it out of In Dev and In Review, closing it, or deleting it. sous-chef stops the Run and leaves the Work Item where it was put.
 _Avoid_: Cancel, abort, kill, stop (sous-chef also stops Runs at limits, which ends in Needs Human)

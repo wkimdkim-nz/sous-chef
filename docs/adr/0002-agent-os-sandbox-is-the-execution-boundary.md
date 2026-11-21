@@ -123,3 +123,34 @@ So **git that runs outside the sandbox only ever touches sous-chef's own reposit
   5. Helper scoping: `git credential fill` for any host but github.com returns no token.
 
 See [How does Workspace git stay safe when the Coding Agent can write the gitdir?](https://github.com/wkimdkim-nz/sous-chef/issues/28).
+
+## Amendment: a protected-path or LFS-pattern change is held until a human releases it
+
+The third amendment's import check stops a protected-path or LFS-pattern change from being pushed. But the earlier decisions still pushed such commits at several points: the draft PR, a Feedback Round ("push, then convert to draft") and a limit hit ("push the commits that exist"). The Run branch lives in the same repository, so GitHub Actions runs a pushed `.github/**` change with the repo's secrets and a write-capable `GITHUB_TOKEN`, before the developer has seen it. Only a Withdraw held such commits back. A Coding Agent steered by hostile text could use any of the other push points to leak CI secrets.
+
+So **no push ever carries an unreviewed protected-path or LFS-pattern change**:
+
+- **One gate, every push point.** The draft PR, Self-Review fixes, a Feedback Round, a limit hit, a Withdraw and a base merge all go through the import check. A path is flagged if it matches a protected path or is a newly added file matching an LFS pattern, **and** its content at the new tip differs from both the last pushed tip (on a first push, the base) and the current base. This replaces the third amendment's `base..tip`: changes the developer has already pushed pass, files a base merge brought in unchanged pass, and an edit the agent has backed out passes. A protected file resolved differently from base in a merge is flagged.
+- **A tripped gate makes a Hold.** Nothing is pushed. The commits stay in the Run clone and at `refs/sous-chef/incoming/<key>` in the trusted clone, which is never pruned while held. The Run goes to Needs Human. On a first push, no branch or PR is created. In a Feedback Round, the PR is converted to draft and no thread replies are posted. A limit hit no longer pushes held commits. On a Withdraw, nothing is written to the Tracker beyond the Status Comment.
+- **The default protected paths widen from `.github/workflows/**` to `.github/**`**, because workflows run local composite actions from `.github/actions/**` with the same secrets.
+- **Only a human at a terminal releases a Hold.** `sous-chef review <key>` requires a TTY and has no `--yes`. It shows the full held diff in a pager and offers Accept, Reject, Discard or Quit. It never checks out the held tip, so agent code is never one keystroke from running unsandboxed. `review` writes nothing to git or the Tracker. It writes a **decision file**, outside the agent's reach, naming the held tip and the last pushed tip. `start` applies it on its next tick only if `refs/sous-chef/incoming/<key>` still equals the held tip, the remote branch still equals the last pushed tip, and no Pass is running. Otherwise the decision is stale: it's discarded, and the developer is notified. Accept is the gate's one exception, and it pushes exactly that SHA.
+  - After a Needs Human Hold, `start` moves the Work Item straight back to In Dev or In Review. **Accept** pushes and continues. **Reject** posts the developer's text as a comment and continues from the held commits. **Discard** resets to the last pushed tip (or the base) and re-runs the held step, with limits still counting.
+  - After a Withdraw Hold, only Accept (push only) and Discard are offered, and the Run is never restarted.
+- **The developer can still act outside `review`.** A Trusted User comment plus Ready is a Reject. Pushing to the Run branch themselves follows the re-Ready rules: a remote at or descending from the held tip continues from it, an unchanged remote continues from the Hold, and a diverged remote wins and discards the Hold.
+- **The Status Comment says what to do, never how.** It shows the reason, the push point, the held tip's short SHA, and file paths with +/- counts, and points to `review`. It shows no diff, because an agent could have written something it read into a held file, and no local paths. Every Hold and every stale decision sends a notification, including after a Withdraw.
+
+### Considered Options
+
+- **Push, then keep the PR a draft** (the earlier rule). Rejected. A draft PR doesn't stop Actions: CI runs on the pushed branch before anyone has looked at it.
+- **Check `base..tip`**, as the third amendment wrote. Rejected. Once a protected path was touched, every later push would be held, even after the developer accepted the change, and a base merge would flag base's own workflow edits.
+- **The developer pushes the held commits by hand**, with copy-pasted git commands. It needs no gate exception, but it means five or more error-prone steps and a local clone, and the review step is easy to skip. It stays possible as the advanced path.
+- **A release label** (`agent:allow-protected`) on the Work Item. Rejected. It approves a change the developer can only see in a public comment, and that comment can't safely include the diff, so it invites rubber-stamping the riskiest push.
+- **Require a token without the `workflow` scope**, so GitHub itself rejects workflow pushes. Not required: it covers only `.github/workflows/**` and breaks the zero-setup `gh auth token` path. `doctor` and the banner warn when the token has it, as defense in depth.
+
+### Consequences
+
+- `start` stays the only writer. "No command acts on a Run" narrows to "only `start` writes, and `review` only queues a decision from a human at a terminal". `status` takes an optional `<key>` and shows Holds, decisions, and the fetch command for the advanced path.
+- Accept is new code on the riskiest path. Binding it to the exact held tip and last pushed tip is what keeps it narrow. The crash matrix covers applying a decision, and the import-rejection probe gains a case: a decision whose held tip has moved pushes nothing.
+- Other code that CI runs (test scripts, `package.json` scripts, Makefiles) is still pushed before review. That's an accepted, documented risk: keep secrets out of jobs that branch pushes and PRs trigger, and gate secret-using jobs behind an Environment with required reviewers.
+
+See [What gates a push, as opposed to marking the PR ready?](https://github.com/wkimdkim-nz/sous-chef/issues/20).
