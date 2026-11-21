@@ -34,3 +34,7 @@ Recovery is not a separate mode. The regular poll adopts any In Dev or In Review
 - **A per-repo lockfile refuses a second instance** on the same machine.
 
 See [Where does Run state live, and how does sous-chef recover after a restart?](https://github.com/wkimdkim-nz/sous-chef/issues/11).
+
+## Amendment: the worktree is a Run clone
+
+"Worktree" above now means the Run's own clone, made from sous-chef's trusted clone ([ADR 0002, third amendment](0002-agent-os-sandbox-is-the-execution-boundary.md#amendment-each-run-gets-its-own-clone-and-unsandboxed-git-only-touches-the-trusted-clone)). It is still derived from the Work Item key and never stored. The last-imported tip is the remote branch tip, so the local file gains no fields. A lost Run clone is recreated from the trusted clone and the branch.

@@ -84,3 +84,42 @@ So **Workspace git never runs code the repo or the agent controls**, and sous-ch
 - The sandbox probe suite gains a probe that plants a hook and checks it never fires.
 
 See [What CLI commands and config file does sous-chef have?](https://github.com/wkimdkim-nz/sous-chef/issues/15).
+
+## Amendment: each Run gets its own clone, and unsandboxed git only touches the trusted clone
+
+The second amendment guarded a gitdir that the agent shares with sous-chef, using three `-c` flags and three write denies. A probe on git 2.52 got past both. The agent rewrote `worktrees/<key>/commondir` (or its worktree's `.git` file) to point at a `config` of its own. sous-chef's unsandboxed `git merge` then ran a merge driver from that config, and `git remote get-url --push origin` returned an attacker's URL, which the inline helper would have handed the token to. The shared gitdir also let one Run's agent move another Run's refs. A deny list cannot win this: git reads executable config from too many keys (`filter.*`, `diff.*.textconv`, `core.sshCommand`, `gpg.program`, `core.editor`, merge drivers), and too many paths decide where that config lives.
+
+So **git that runs outside the sandbox only ever touches sous-chef's own repository and config**:
+
+- **Trusted clone.** One full clone per repo under `$XDG_DATA_HOME/sous-chef/<owner>/<repo>/`. It is the only repository with network or credentials, and no agent or check can write to it. It fetches and pushes by the literal URL `https://github.com/<owner>/<repo>.git`, never by remote name. The inline credential helper is bound to `credential.https://github.com.helper`. `transfer.fsckObjects=true` is set, `gc.auto=0` is set, maintenance is off, and it never prunes.
+- **Run clone.** Each Run gets an ordinary clone in its own Run directory, made with `git clone --shared` from the trusted clone, so it reads trusted objects through alternates and writes only its own. The sandbox lets a Run write only its Run directory and temp. The trusted clone and other Runs' directories are readable but not writable. The trusted clone holds no secrets.
+- **Every git command against a Run clone runs in the core sandbox**, under the same policy as `checks`: checkout, the inbound fetch, the base merge, status and unsaved-work checks, and bundling. Anything the agent planted in that clone's config can only run there.
+- **Inbound**, a sandboxed `git fetch <trusted-clone-path> <ref>` runs inside the Run clone. `upload-pack` runs against the trusted repository, so it reads only trusted config.
+- **Outbound**, a sandboxed `git bundle create` writes `<last-imported>..refs/heads/<branch>` to a file in the Run directory. sous-chef then runs `git fetch <bundle> refs/heads/<branch>:refs/sous-chef/incoming/<key>` in the trusted clone. Fetching a bundle reads one data file, so no foreign config is involved and nothing is executed.
+- **Before anything is pushed**, the import is checked in the trusted clone. Only the one named ref is taken, its objects pass fsck, the new tip descends from the last pushed tip (or from the base on the first push), and the protected-path and LFS-pattern checks run on `base..tip` with `--no-ext-diff --no-textconv`. Any failure means nothing is pushed, and the Run goes to Needs Human with the reason. There is no size cap, because the agent can already fill the disk from its own worktree.
+- **The base merge** happens in the Run clone, sandboxed, after an inbound fetch of the base. A conflict becomes a Feedback Round, as already decided.
+- The `-c` flags and env isolation from the second amendment stay on every git command sous-chef runs, sandboxed or not. The three `.git` write denies are dropped, since no unsandboxed git ever reads a Run clone.
+
+### Considered Options
+
+- **Keep the shared gitdir and pin it**, with explicit `GIT_DIR`/`GIT_COMMON_DIR`, a literal push URL and a host-bound helper. Rejected. That fixes the two probed paths, but every unsandboxed git command would still read config the agent can write, which is the "a config path the deny list didn't name" failure again.
+- **Widen the deny list.** Rejected for the same reason, and `commondir` redirection steps around it anyway.
+- **No git for the agent**, with sous-chef committing snapshots of the worktree. Rejected. It's the safest, but it throws away the agent's commits and messages, and leaves the agent no `diff`, `log` or `stash` against a base.
+- **An unsandboxed `git fetch <run-clone-path>`** to import. Rejected. Its `upload-pack` reads the Run clone's config.
+- **Hardlinked Run clones** (`git clone --local`). Rejected. The agent owns the files and could rewrite a shared object in place, corrupting the trusted clone.
+- **A partial (`blob:none`) trusted clone**, as the second amendment chose. Rejected. Run clones have no network, so they couldn't fetch history blobs lazily, and `git log -p`, `blame` and old diffs would fail for the agent. A full clone is paid once per repo, and alternates keep each Run clone small.
+
+### Consequences
+
+- The first clone of a repo downloads its full history.
+- The trusted clone only grows, because it never prunes while Run clones depend on its objects through alternates. Repacking without pruning is safe.
+- Unsaved work in a Run clone is a dirty tree or commits not yet imported. It's found by sandboxed `status`/`rev-list`. The agent can lie in that output, but then the only thing it can lose is its own work.
+- The last-imported tip is the remote branch tip, which is already the record (ADR 0003), so the local record gains nothing. A crash between import and push redoes the push, which the incoming ref in the trusted clone shows. A lost Run clone is recreated with `clone --shared` and a checkout of the branch.
+- The sandbox probe suite's single hook probe is replaced by five probes. Each one has a planted payload try to write a marker outside the Run directory, and fails if the marker appears:
+  1. Planted config never runs outside the sandbox: hooks, `core.hooksPath`, `core.fsmonitor`, `core.sshCommand` with `url.*.insteadOf`, `gpg.program`, `core.editor`, `filter.*`, `diff.*.textconv` and a merge driver set up through `.gitattributes`. The probe drives the whole Workspace sequence: inbound fetch, base merge, bundle, import, push.
+  2. Gitdir redirection: the agent points its `.git`, `commondir` and `objects/info/alternates` at paths it controls. Writes stay in the Run directory, and the import takes only the named ref.
+  3. Cross-Run writes: one Run's agent can't write another Run's directory or the trusted clone's refs, objects or config.
+  4. Import rejection: a bundle with an extra ref, a tip that doesn't descend from the last pushed tip, or a corrupt object goes to Needs Human with nothing pushed.
+  5. Helper scoping: `git credential fill` for any host but github.com returns no token.
+
+See [How does Workspace git stay safe when the Coding Agent can write the gitdir?](https://github.com/wkimdkim-nz/sous-chef/issues/28).
