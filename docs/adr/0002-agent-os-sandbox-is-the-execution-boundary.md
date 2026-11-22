@@ -212,3 +212,43 @@ So **a Run is built from sous-chef config plus the base branch, never from what 
 - The probe suite gains cases: Read and Grep through a symlink to a planted `~/.aws/credentials` are refused; Edit and Write outside the Run clone and through a symlink are refused; WebFetch to a domain outside `docsDomains`, including a pre-approved docs domain, is refused; a planted user hook, project hook, user MCP server and `.mcp.json` server never fire; a skill's `!` line can't reach the network; a skill with frontmatter `hooks` fails preflight; the session's reported tools, MCP servers and skills match the expected set exactly, with nothing from the developer's real `~/.claude`.
 
 See [Which Claude Code settings, hooks and MCP servers load in a Run?](https://github.com/wkimdkim-nz/sous-chef/issues/22).
+
+## Amendment: no credential is ever in a process environment; Claude Code and git get theirs on an inherited fd
+
+The earlier decisions kept credentials out of the agent's *subprocess* environment: sous-chef deleted them from its own `process.env`, passed the Anthropic key to Claude Code in the SDK's `env` with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, and handed git the token as `$SOUS_CHEF_PUSH_TOKEN`. On macOS that isn't enough. A process's starting environment stays readable to every process of the same user through `sysctl(KERN_PROCARGS2)` (what `ps eww` uses), and deleting from `process.env` doesn't change it. A probe with fake values showed a command inside srt's Seatbelt sandbox reading the full starting environment of an unsandboxed Node process and of `claude -p`, although the profile allows `process-info*` only for the same sandbox and doesn't list `kern.procargs2`. So any sandboxed command could read sous-chef's tokens, every Run's Anthropic key, and a concurrent push git's token. Linux is not affected: srt always unshares the PID namespace and mounts a fresh `/proc`. See [Where can each credential be seen, and by what?](https://github.com/wkimdkim-nz/sous-chef/issues/24) and `docs/research/credential-visibility.md`.
+
+So **neither credential is ever placed in any process's environment, on any platform**, and each one has a stated list of holders:
+
+| Credential | May hold it | Must never hold it, or read a process that does |
+|---|---|---|
+| GitHub token | the sous-chef process (memory); the unsandboxed git children on the trusted clone, for one fetch or push | the Claude Code process, the agent's shell, `checks`, sandboxed Run-clone git, `notify.command`, any `*Command` but its own source |
+| Anthropic key | the sous-chef process (memory); the Claude Code process | the agent's shell, `checks`, every git child, `notify.command` |
+
+"Hold" means environment, argv, a readable file or an inherited fd.
+
+- **No environment-variable sources.** `$GITHUB_TOKEN` and `$ANTHROPIC_API_KEY` are no longer credential sources. If either is set when `start` or `doctor` runs, preflight fails (exit 2) and points at `github.tokenCommand`, `gh auth token` and `claude.apiKeyCommand`. Sources are read once into memory.
+- **Claude Code** gets the key on fd 3, through the SDK's `spawnClaudeCodeProcess`, with `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=3` in its env. Neither `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set. The variable is undocumented, so it's pinned to the Claude Code version floor and covered by a contract test. If it ever disappears, the fallback is `apiKeyHelper` set through the SDK `settings` layer, fetching from a Unix socket sous-chef serves; the helper string (which lands in `--settings` argv) never contains the key.
+- **Git** gets the token on fd 3, read by the inline helper bound to `credential.https://github.com.helper` after the empty helper: `!f() { test "$1" = get || exit 0; echo username=x-access-token; printf password=; head -n1 <&3; }; f`. The `get` guard covers git's later `store` and `erase` calls on the one-shot pipe. The token never appears literally in any `-c` value, because git re-exports those to its children in `GIT_CONFIG_PARAMETERS`.
+- **`checks`** get the agent's allowlisted environment minus every credential sous-chef holds. This corrects the first amendment's "same scrubbed environment as the agent". A repo whose tests need an Anthropic key brings its own through `passEnv`.
+- **`CLAUDE_CONFIG_DIR`** holds no key. This corrects the sixth amendment's "holding only the API key": in `-p` mode Claude Code writes no `customApiKeyResponses`, `primaryApiKey` or `.credentials.json`.
+
+### Considered Options
+
+- **Environment plus scrub, switching only if a probe finds a leak** (the earlier plan). Rejected. Whether `KERN_PROCARGS2` gets through depends on the macOS release and the sandbox profile, so a passing probe today says nothing about the next one. The probe did find the leak.
+- **`apiKeyHelper` as the primary route.** Kept as the fallback. It needs a socket or file for the helper to read from, and a helper process that re-runs every five minutes.
+- **Keep environment sources and warn on macOS.** Rejected: it ships the leak knowingly.
+- **Allow environment sources on Linux only.** Rejected: one rule on both platforms is easier to explain and to test.
+- **Re-exec sous-chef without the variables, or set `CS_RESTRICT` on itself through `csops`.** Rejected: fragile exec or native code on the startup path, for a source that `*Command` and `gh auth token` already cover.
+
+### Consequences
+
+- The CLI/config decision's source table loses its first column, and `init` and `doctor` say so.
+- **Accepted, documented risk:** on macOS, a sandboxed command can read the starting environment of *any* process of the same user, including shells and tools that the developer started with a token exported. sous-chef can't add Seatbelt rules to srt or Claude Code. `doctor` warns on macOS when `GITHUB_TOKEN`, `GH_TOKEN` or `ANTHROPIC_API_KEY` is set in its own environment, and the gap is reported upstream to `anthropics/sandbox-runtime`.
+- **Accepted:** on Linux, unsandboxed same-user code could drain a git child's fd 3 through `/proc/<pid>/fd`. Sandboxed code can't see the pid.
+- The probe suite's key-discovery probe is replaced. Searchers are a command from the agent's Bash, a `checks` command and a sandboxed Run-clone git payload. They look for both credentials, raw, base64 and URL-encoded. All of this runs while sous-chef, a live Claude Code process and an in-flight trusted-clone push are running, with concurrency 2, on macOS and Linux. It never skips, and a hit fails the release:
+  1. `KERN_PROCARGS2` (macOS) or `/proc/<pid>/environ` and `cmdline` (Linux) for sous-chef, every Claude Code process and the push git hold neither credential.
+  2. On Linux, the Read tool on `/proc/*/environ` is refused.
+  3. The Run directory, its `CLAUDE_CONFIG_DIR` and the Pass transcripts contain no fragment of the key, including its last 20 characters.
+  4. The fd 3 key path works, and the key appears nowhere else, so an ignored variable fails the suite.
+  5. git's `GIT_CONFIG_PARAMETERS` and argv never contain the token.
+  6. A recording-only probe reads macOS procargs of an outside process and reports, without failing, whether the upstream gap is still open.
