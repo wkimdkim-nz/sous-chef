@@ -49,7 +49,7 @@ The Tracker state meaning a Run stopped without finishing (it failed, hit a limi
 _Avoid_: Blocked, failed, stuck, needs info (each is a reason, not the state)
 
 **Hold**:
-Commits a Run made that sous-chef won't push, because they touch a protected path or add a file matching an LFS pattern. They stay local until the developer pushes or discards them.
+Outgoing content from a Run that sous-chef won't publish without the developer: commits that touch a protected path, add a file matching an LFS pattern or may contain a secret, or Coding Agent text that may contain a secret. It stays local until the developer releases or discards it.
 _Avoid_: Quarantine, block, reject
 
 **Withdraw**:

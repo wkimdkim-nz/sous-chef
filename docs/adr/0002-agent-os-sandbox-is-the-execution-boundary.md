@@ -154,3 +154,30 @@ So **no push ever carries an unreviewed protected-path or LFS-pattern change**:
 - Other code that CI runs (test scripts, `package.json` scripts, Makefiles) is still pushed before review. That's an accepted, documented risk: keep secrets out of jobs that branch pushes and PRs trigger, and gate secret-using jobs behind an Environment with required reviewers.
 
 See [What gates a push, as opposed to marking the PR ready?](https://github.com/wkimdkim-nz/sous-chef/issues/20).
+
+## Amendment: reads are an allowlist, and outgoing content is scanned as a backstop
+
+The read policy denied a fixed list of credential paths and left the rest of `$HOME` readable: `~/.git-credentials`, `~/.claude`, shell history, cloud CLI config, `.env` files in other projects. The network policy keeps the agent off GitHub, but sous-chef then carries the agent's commits and text there itself, as the developer. Claude Code's own Read, Grep and Glob tools don't obey the sandbox's `denyRead` at all. A Coding Agent steered by hostile text could read a secret and leave it in a commit or a PR body.
+
+No outgoing scan can stop an agent that encodes what it read (base64, split across commits, paraphrased). So **what the agent can't read can't leave is the guarantee, and the scan is only a backstop for accidents**:
+
+- **Reads are an allowlist, enforced in three places.** The agent's shell runs under Claude Code's sandbox with `permissions.blockReadsOutsideWorkingDirectories` plus `sandbox.filesystem.allowRead` for toolchain directories. The same switch hard-refuses Read, Grep, Glob and LSP outside the Run clone in every permission mode. `checks` and sandboxed git run under the core srt sandbox with `denyRead: ["~/"]` and the same `allowRead`. The old credential list stays as narrower denies, which beat a broader allow, so `~/.cargo/credentials.toml` stays unreadable inside an allowed `~/.cargo`.
+- **The allowlist.** Built-in toolchain defaults (nvm, fnm, Volta, pnpm, `.rustup`, `.cargo`, `.pyenv`, `.m2`, `.gradle`), the Run's own directory and the trusted clone. Other Runs' directories are no longer readable. `~/.npmrc`, `~/.pypirc`, `~/.gitconfig`, `~/.git-credentials` and `~/.docker/config.json` are always denied, because they often hold tokens. The developer extends the list only with `sandbox.allowRead` in the per-repo user config, never from the repo or the Recipe, and an entry covering an always-denied path is fatal at startup.
+- **Versions.** sous-chef requires Claude Code ≥ 2.1.257 and `@anthropic-ai/sandbox-runtime` ≥ 0.0.83, and `doctor` checks both.
+- **Everything that leaves is scanned.** Before a push, the content the import gate already flags as new (differing from both the last pushed tip and the base) is scanned. Before a post, so are the PR title and body, thread replies, round summaries, needs-info questions and any agent text quoted in the Status Comment. The rules are a bundled, offline, gitleaks-style set, plus an exact match on every credential sous-chef holds (the GitHub token and the Anthropic key, raw, base64 and URL-encoded). The scan is always on. False positives are allowed by rule ID or path glob in `secretScan.allow`, in the user config only. Public and private repos get the same policy. On a public repo, `doctor`, the banner and Hold notifications say that pushes are world-readable at once.
+- **A hit is a Hold.** Commits are held exactly as a protected-path change is held. Text is withheld, not posted. The Status Comment shows the reason, the rule ID and the paths, never the matched value. `sous-chef review <key>` shows the held diff or text locally and offers Accept, Reject or Discard. An exact match on a credential sous-chef holds offers only Reject or Discard, and the notification says to rotate that credential.
+
+### Considered Options
+
+- **Keep the denylist and lengthen it.** Rejected. Every developer's `$HOME` holds secrets the list doesn't name, and the list would never be finished.
+- **Make the scan the guarantee** and leave reads broad. Rejected. An agent that encodes what it read gets past any scanner.
+- **No scan at all.** Rejected. Real repos sometimes carry a real secret in a fixture or `.env.example`, and catching that is cheap.
+- **Block registry uploads** with a TLS-intercepting srt proxy that allows only GET and HEAD, with Claude Code pointed at it via `httpProxyPort`. Deferred. srt ≥ 0.0.51 can do it (`tlsTerminate` plus `filterRequest`, with `refuseOpaqueTunnels`), but every toolchain in a Run would have to trust sous-chef's CA, each configured differently, and that is the likeliest thing to break on a real repo.
+
+### Consequences
+
+- Toolchains that read settings from an always-denied file, or write caches under an allowed directory (on Linux, an `allowWrite` nested inside an `allowRead` carve-out is silently read-only, anthropics/sandbox-runtime#446), need configuration sous-chef writes into the Run directory. That is decided with what a real repository needs writable.
+- The probe suite gains cases: Bash, the Read tool and a `checks` command each fail to read a planted `~/.aws/credentials`; one Run can't read another Run's directory; a planted secret in a commit and in a PR body each make a Hold; the GitHub token in base64 matches exactly.
+- **Accepted, documented risk:** registries accept uploads, so an agent steered by hostile text could publish a private repo's source with an attacker's own token. The developer's own publish tokens are unreadable, and only Trusted Users start Runs.
+
+See [What can a Run read, and what may leave through the commits and text sous-chef publishes?](https://github.com/wkimdkim-nz/sous-chef/issues/21).
