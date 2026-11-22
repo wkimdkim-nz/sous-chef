@@ -181,3 +181,34 @@ No outgoing scan can stop an agent that encodes what it read (base64, split acro
 - **Accepted, documented risk:** registries accept uploads, so an agent steered by hostile text could publish a private repo's source with an attacker's own token. The developer's own publish tokens are unreadable, and only Trusted Users start Runs.
 
 See [What can a Run read, and what may leave through the commits and text sous-chef publishes?](https://github.com/wkimdkim-nz/sous-chef/issues/21).
+
+## Amendment: a Run loads no Claude Code config from the host or the repo, only pinned instructions and skills
+
+The sandbox wraps only shell commands. Claude Code's command hooks, stdio MCP servers, plugin monitors, LSP servers and WebFetch all run outside it, with the developer's full access. Leaving `settingSources` out loads the developer's `~/.claude` (hooks, MCP servers signed in to other services, plugins, memory) and the repo's `.claude/settings.json` hooks and `.mcp.json`. That is code running unsandboxed while the agent reads text that may be hostile. The Run's own commits could also change the repo's agent config before a later Pass loads it. And the test suites ran with `settingSources: []`, so they never saw what production loaded.
+
+So **a Run is built from sous-chef config plus the base branch, never from what happens to be on the machine or the Run's branch**:
+
+- **Isolation.** Every Pass runs with a fresh `CLAUDE_CONFIG_DIR` inside the Run directory (holding only the API key), `settingSources: []`, `settings: { disableAllHooks, disableClaudeAiConnectors, permissions.blockReadsOutsideWorkingDirectories, permissions.blockWritesOutsideWorkingDirectories }`, `strictMcpConfig: true` with an empty `mcpServers`, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+- **Instructions.** sous-chef reads `CLAUDE.md`, `AGENTS.md` and `.claude/rules` from the base-branch tip in the trusted clone at Run start and appends them through `systemPrompt: {type: 'preset', append}`. The repo's settings, hooks and `.mcp.json` never load.
+- **Skills.** Only the skills the Recipe names with `/name` load. They are copied at Run start from `~/.claude/skills` or the repo's `.claude/skills` at base into a skills-only local plugin in the Run directory, where their scripts can run in the sandbox. A Recipe skill that is missing, exists in both places, or carries frontmatter `hooks` or a `.claude-plugin/` folder is a preflight error. `!` lines stay, because they run through permission-checked, sandboxed Bash.
+- **Pinning.** Instructions and skills are pinned for the whole Run, as the Recipe is, so the Run's own commits never change what its later Passes load. No pre-Pass check of agent-config paths is needed.
+- **Tools.** `dontAsk` permission mode, the explicit tool allowlist, `disallowedTools: ["mcp__*"]`, and no `canUseTool` that approves. sous-chef's own in-process `PreToolUse` hook refuses WebFetch outside `docsDomains`, because Claude Code pre-approves some documentation domains on its own.
+- **No MCP servers in a Run in v1.**
+- **Managed policy.** `start` refuses if endpoint managed settings or `managed-mcp.json` force hooks or MCP servers, because the Run couldn't be confined. Other managed policy is a banner warning. Server-managed settings don't reach a Console API key, which is documented.
+- **One options builder.** Production, the contract suites and the probes build `query()` options through the same function.
+- **Versions.** Claude Code ≥ 2.1.314, for `blockWritesOutsideWorkingDirectories` and the symlink fixes before it.
+
+### Considered Options
+
+- **Load everything, as an interactive session would.** Rejected. Hooks and MCP servers would run unsandboxed, and a Run would depend on whatever is in the developer's home directory that day.
+- **Load the `project` source** to get the repo's `CLAUDE.md` and skills. Rejected. The same switch loads `.claude/settings.json` hooks, from the Run's own working tree.
+- **Point a local plugin at the repo's `.claude/`.** Rejected. A plugin root also auto-loads `hooks/hooks.json` and `.mcp.json`.
+- **Check before every Pass that agent-config paths match base.** Not needed once nothing is loaded from the Run clone.
+- **Make `.claude/**` and `.mcp.json` protected paths.** Rejected as a default. A protected path is one that runs before human review, as CI does. These run only when someone opens Claude Code on the branch, like `package.json` scripts. They are documented as sensible extra `protectedPaths` entries.
+
+### Consequences
+
+- Repos that rely on project hooks or MCP servers lose them in Runs. A user skill that reaches back into `~/.claude/skills` by absolute path breaks, which is documented.
+- The probe suite gains cases: Read and Grep through a symlink to a planted `~/.aws/credentials` are refused; Edit and Write outside the Run clone and through a symlink are refused; WebFetch to a domain outside `docsDomains`, including a pre-approved docs domain, is refused; a planted user hook, project hook, user MCP server and `.mcp.json` server never fire; a skill's `!` line can't reach the network; a skill with frontmatter `hooks` fails preflight; the session's reported tools, MCP servers and skills match the expected set exactly, with nothing from the developer's real `~/.claude`.
+
+See [Which Claude Code settings, hooks and MCP servers load in a Run?](https://github.com/wkimdkim-nz/sous-chef/issues/22).
